@@ -1,0 +1,11 @@
+Flask
+flask-cors
+tensorflow
+Pillow
+requests
+beautifulsoup4
+lxml
+python-dotenv
+selenium
+webdriver-manager
+psycopg2-binary

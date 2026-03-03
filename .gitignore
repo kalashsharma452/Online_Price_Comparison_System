@@ -1,0 +1,47 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+!backend/.env.example
+!frontend/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+backend/venv/
+*.db
+app.db
+backend/app.db
+
+# Node
+node_modules/
+frontend/node_modules/
+build/
+dist/
+frontend/build/
+coverage/
+
+# Runtime / temp
+uploads/
+backend/uploads/
+*.log
+backend/flask_debug.log
+backend/flask_err.log
+
+# Local notes
+sens.txt
+main.txt
+project-tree.txt
