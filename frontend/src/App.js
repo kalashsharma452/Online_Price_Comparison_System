@@ -1,24 +1,194 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import axios from "axios";
+import OptimizedImage from "./components/OptimizedImage";
+import AnalysisPage from "./components/AnalysisPage";
+import LandingPage from "./components/LandingPage";
+import { AboutPage, CartPage, ProfilePage, UploadPage, UploadsPage } from "./components/UserPages";
+import { DEFAULT_ANALYSIS_HISTORY, NAV_ITEMS } from "./appConstants";
 import "./App.css";
 
-const API_BASE = process.env.REACT_APP_API_BASE || "http://127.0.0.1:5050";
-const FALLBACK_PRODUCT_IMAGE = "https://via.placeholder.com/420x300?text=No+Image";
+const DEFAULT_API_BASE = "http://127.0.0.1:5050";
+const RAW_API_BASE = (process.env.REACT_APP_API_BASE || "").trim();
+
+function normalizeApiBase(rawBase) {
+  const base = (rawBase || "").trim() || DEFAULT_API_BASE;
+  if (typeof window !== "undefined" && window.location?.protocol === "https:" && base.startsWith("http://")) {
+    return `https://${base.slice("http://".length)}`;
+  }
+  return base;
+}
+
+const API_BASE = normalizeApiBase(RAW_API_BASE);
+const FALLBACK_PRODUCT_IMAGE =
+  "data:image/svg+xml;utf8," +
+  "<svg xmlns='http://www.w3.org/2000/svg' width='420' height='300'>" +
+  "<rect width='100%' height='100%' fill='%23f1f5f9'/>" +
+  "<text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' " +
+  "fill='%2394a3b8' font-family='Segoe UI, Arial' font-size='18'>No Image</text>" +
+  "</svg>";
 const USERNAME_REGEX = /^[A-Za-z0-9._]+$/;
 const AUTH_STORAGE_KEY = "price_intel_auth";
 const TAB_STORAGE_KEY = "price_intel_active_tab";
-const NAV_ITEMS = [
-  { key: "home", label: "Home" },
-  { key: "results", label: "Results" },
-  { key: "upload", label: "Upload" },
-  { key: "uploads", label: "History" },
-];
+const SESSION_CACHE_PREFIX = "price_intel_response_cache";
+const CLIENT_CACHE_MS = 1000 * 60 * 3;
+const CDN_BASE = (process.env.REACT_APP_CDN_BASE || "").replace(/\/$/, "");
+const CATEGORY_LABELS = {
+  electronics: "Electronics",
+  gaming: "Gaming",
+  home: "Home",
+  kitchen: "Kitchen",
+  appliances: "Appliances",
+  furniture: "Furniture",
+  fashion: "Fashion",
+  sports: "Sports",
+  beauty: "Beauty",
+  toys: "Toys",
+  groceries: "Groceries",
+  automotive: "Automotive",
+  books: "Books",
+  others: "Others",
+  general: "General",
+};
+
+function readClientCache(cacheKey, maxAgeMs = CLIENT_CACHE_MS) {
+  try {
+    const raw = sessionStorage.getItem(`${SESSION_CACHE_PREFIX}:${cacheKey}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.savedAt || Date.now() - parsed.savedAt > maxAgeMs) {
+      sessionStorage.removeItem(`${SESSION_CACHE_PREFIX}:${cacheKey}`);
+      return null;
+    }
+    return parsed.value ?? null;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function writeClientCache(cacheKey, value) {
+  try {
+    sessionStorage.setItem(
+      `${SESSION_CACHE_PREFIX}:${cacheKey}`,
+      JSON.stringify({ savedAt: Date.now(), value })
+    );
+  } catch (_err) {
+    // Ignore sessionStorage errors.
+  }
+}
+
+function clearClientCacheByPrefix(cachePrefix) {
+  try {
+    const fullPrefix = `${SESSION_CACHE_PREFIX}:${cachePrefix}`;
+    Object.keys(sessionStorage).forEach((key) => {
+      if (key.startsWith(fullPrefix)) {
+        sessionStorage.removeItem(key);
+      }
+    });
+  } catch (_err) {
+    // Ignore sessionStorage errors.
+  }
+}
+
+function buildAssetUrl(path) {
+  if (!path) return "";
+  if (/^https?:\/\//i.test(path) || path.startsWith("blob:") || path.startsWith("data:")) {
+    return path;
+  }
+  const normalized = String(path).replace(/^\/+/, "");
+  if (!normalized) return "";
+  const isBareFilename = !normalized.includes("/");
+  const looksLikeUpload = normalized.startsWith("api/uploads/") || normalized.startsWith("uploads/");
+  if (CDN_BASE) {
+    return isBareFilename ? `${CDN_BASE}/${normalized}` : `${CDN_BASE}/${normalized}`;
+  }
+  if (isBareFilename) {
+    return `${API_BASE}/api/uploads/${normalized}`;
+  }
+  if (looksLikeUpload) {
+    return `${API_BASE}/${normalized}`;
+  }
+  return `${API_BASE}/${normalized}`;
+}
+
+function sanitizePlainText(value, maxLen = 255) {
+  if (value == null) return "";
+  let text = String(value);
+  text = text.replace(/[\x00-\x1f\x7f]/g, " ");
+  if (text.includes("<") || text.includes(">")) {
+    text = text.replace(/<[^>]*>/g, " ");
+  }
+  text = text.replace(/javascript:/gi, "");
+  text = text.replace(/on[a-z0-9_]+\s*=/gi, "");
+  text = text.replace(/\s+/g, " ").trim();
+  if (maxLen && text.length > maxLen) {
+    text = text.slice(0, maxLen).trim();
+  }
+  return text;
+}
+
+function titleCase(value) {
+  return String(value || "")
+    .split(/[\s/_-]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function pickCategoryKey(rawLabel, name) {
+  const text = `${rawLabel || ""} ${name || ""}`.toLowerCase();
+  if (/(game|gaming|playstation|xbox|nintendo|console)/.test(text)) return "gaming";
+  if (/(phone|iphone|android|laptop|notebook|camera|tablet|headphone|earbud|tv|monitor|gpu|graphics|ssd|router|smart|electronics)/.test(text)) {
+    return "electronics";
+  }
+  if (/(wardrobe|sofa|chair|table|desk|bed|dresser|cabinet|furniture)/.test(text)) return "furniture";
+  if (/(vacuum|microwave|blender|fridge|refrigerator|washer|dryer|appliance)/.test(text)) return "appliances";
+  if (/(kitchen|cookware|utensil|utensils|kettle|pan|pot|dish|cutlery)/.test(text)) return "kitchen";
+  if (/(home|decor|bedding|bath|lighting|mattress)/.test(text)) return "home";
+  if (/(shoe|shirt|dress|jean|fashion|apparel|clothing|watch|jewelry|bag)/.test(text)) return "fashion";
+  if (/(ball|bat|sports|gym|fitness|cricket|football|basketball|tennis|bike)/.test(text)) return "sports";
+  if (/(beauty|skincare|cosmetic|makeup|perfume|fragrance|facewash|face wash|cleanser|moisturizer|sunscreen)/.test(text)) {
+    return "beauty";
+  }
+  if (/(toy|lego|kids|baby|toddler)/.test(text)) return "toys";
+  if (/(grocery|food|snack|beverage|drink|tea|coffee)/.test(text)) return "groceries";
+  if (/(car|auto|vehicle|motor|tire|tyre|engine)/.test(text)) return "automotive";
+  if (/(book|novel|magazine|literature)/.test(text)) return "books";
+  return "others";
+}
+
+function getCategoryTag(item, fallbackLabel = "General") {
+  const rawLabel =
+    item?.category ||
+    item?.category_name ||
+    item?.type ||
+    item?.store_category ||
+    "";
+  const name = item?.name || item?.product_name || item?.title || "";
+  const trimmedLabel = String(rawLabel || "").trim();
+  const labelWordCount = trimmedLabel ? trimmedLabel.split(/\s+/).length : 0;
+  const isLabelTooLong = trimmedLabel.length > 28 || labelWordCount > 4;
+  const key = pickCategoryKey(rawLabel, name);
+  const baseLabel =
+    trimmedLabel && trimmedLabel.toLowerCase() !== "general" && !isLabelTooLong
+      ? trimmedLabel
+      : CATEGORY_LABELS[key] || fallbackLabel;
+  return {
+    label: titleCase(baseLabel),
+    className: `product-meta category-pill category-${key}`,
+  };
+}
 
 function App() {
   const [authMode, setAuthMode] = useState("signin");
   const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [resetToken, setResetToken] = useState("");
+  const [forgotMode, setForgotMode] = useState(false);
+  const [forgotNotice, setForgotNotice] = useState("");
   const [phone, setPhone] = useState("");
   const [postalCode, setPostalCode] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -26,12 +196,16 @@ function App() {
   const [authError, setAuthError] = useState("");
   const [token, setToken] = useState("");
   const [user, setUser] = useState(null);
+  const [profileEmail, setProfileEmail] = useState("");
+  const [profilePhone, setProfilePhone] = useState("");
+  const [profilePostalCode, setProfilePostalCode] = useState("");
+  const [profileNotice, setProfileNotice] = useState("");
+  const [profileError, setProfileError] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState("home");
+  const [activeTab, setActiveTab] = useState("landing");
   const [profileOpen, setProfileOpen] = useState(false);
   const [searchText, setSearchText] = useState("");
-  const [apiSuggestions, setApiSuggestions] = useState([]);
-  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [compareQuery, setCompareQuery] = useState("");
   const [compareLoading, setCompareLoading] = useState(false);
   const [compareLiveRefreshing, setCompareLiveRefreshing] = useState(false);
@@ -41,6 +215,36 @@ function App() {
   const [compareLastUpdatedAt, setCompareLastUpdatedAt] = useState(null);
   const [compareSummary, setCompareSummary] = useState(null);
   const [compareProducts, setCompareProducts] = useState([]);
+  const [dashboardSummary, setDashboardSummary] = useState(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [analysisQuery, setAnalysisQuery] = useState("");
+  const [analysisProducts, setAnalysisProducts] = useState([]);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisHasSearched, setAnalysisHasSearched] = useState(false);
+  const [analysisError, setAnalysisError] = useState("");
+  const [selectedAnalysisProduct, setSelectedAnalysisProduct] = useState(null);
+  const [analysisHistory, setAnalysisHistory] = useState(DEFAULT_ANALYSIS_HISTORY);
+  const [analysisHistoryLoading, setAnalysisHistoryLoading] = useState(false);
+  const [recommendations, setRecommendations] = useState([]);
+  const [recommendationsLoading, setRecommendationsLoading] = useState(false);
+  const [popularSearches, setPopularSearches] = useState([]);
+  const [comparisonBasket, setComparisonBasket] = useState([]);
+  const [sharePopupOpen, setSharePopupOpen] = useState(false);
+  const [sharePopupDeal, setSharePopupDeal] = useState(null);
+  const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
+  const [notificationFlyoutStyle, setNotificationFlyoutStyle] = useState(null);
+  const [priceAlerts, setPriceAlerts] = useState([]);
+  const [alertNotifications, setAlertNotifications] = useState([]);
+  const [alertsLoading, setAlertsLoading] = useState(false);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [alertTargetPrice, setAlertTargetPrice] = useState("");
+  const [alertChannel, setAlertChannel] = useState("in_app");
+  const [alertEmail, setAlertEmail] = useState("");
+  const [alertQuery, setAlertQuery] = useState("");
+  const [alertNotice, setAlertNotice] = useState("");
+  const [alertError, setAlertError] = useState("");
+  const [alertSaving, setAlertSaving] = useState(false);
+  const [emailAlertsEnabled, setEmailAlertsEnabled] = useState(false);
   const [sortBy, setSortBy] = useState("price_asc");
   const [storeFilter, setStoreFilter] = useState("all");
   const [minPriceFilter, setMinPriceFilter] = useState("");
@@ -58,35 +262,51 @@ function App() {
   const [suggestionsErrorAfterUpload, setSuggestionsErrorAfterUpload] = useState("");
   const [loading, setLoading] = useState(false);
   const [images, setImages] = useState([]);
+  const [searchHistory, setSearchHistory] = useState([]);
+  const [wishlistItems, setWishlistItems] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [searchHistoryLoading, setSearchHistoryLoading] = useState(false);
+  const [wishlistLoading, setWishlistLoading] = useState(false);
+  const [wishlistNotice, setWishlistNotice] = useState("");
+  const [wishlistError, setWishlistError] = useState("");
+  const [savingWishlistUrl, setSavingWishlistUrl] = useState("");
   const [deletingImageId, setDeletingImageId] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const inputRef = useRef(null);
   const compareSnapshotRef = useRef("");
   const deepLinkHydratedRef = useRef(false);
-
-  const quickProducts = useMemo(() => {
-    return apiSuggestions.map((item) => ({
-      name: item.name,
-      category: item.category || "General",
-      price: "Suggested from database",
-    }));
-  }, [apiSuggestions]);
+  const notificationTriggerRef = useRef(null);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(AUTH_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      const savedToken = typeof parsed?.token === "string" ? parsed.token : "";
-      const savedUser = parsed?.user && typeof parsed.user === "object" ? parsed.user : null;
-      if (!savedToken || !savedUser) return;
-      setToken(savedToken);
-      setUser(savedUser);
-      fetchMyImages(savedToken);
-    } catch (_err) {
-      localStorage.removeItem(AUTH_STORAGE_KEY);
-    }
+    let disposed = false;
+    const hydrateAuth = async () => {
+      try {
+        const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        const savedToken = typeof parsed?.token === "string" ? parsed.token : "";
+        if (!savedToken) return;
+        const currentUser = await fetchCurrentUser(savedToken);
+        if (!currentUser || disposed) return;
+        setToken(savedToken);
+        setUser(currentUser);
+        setProfileEmail(currentUser.email || "");
+        setProfilePhone(currentUser.phone || "");
+        setProfilePostalCode(currentUser.postal_code || "");
+        localStorage.setItem(
+          AUTH_STORAGE_KEY,
+          JSON.stringify({ token: savedToken, user: currentUser })
+        );
+        fetchDashboardSummary(savedToken);
+        fetchRecommendations(savedToken);
+      } catch (_err) {
+        localStorage.removeItem(AUTH_STORAGE_KEY);
+      }
+    };
+    hydrateAuth();
+    return () => {
+      disposed = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -102,36 +322,47 @@ function App() {
   }, []);
 
   useEffect(() => {
-    let disposed = false;
-    const timer = setTimeout(async () => {
-      try {
-        setSuggestionsLoading(true);
-        const query = searchText.trim();
-        const res = await axios.get(`${API_BASE}/api/products`, {
-          params: {
-            limit: 8,
-            ...(query ? { name: query } : {}),
-          },
-        });
-        if (!disposed) {
-          setApiSuggestions(res.data?.products || []);
-        }
-      } catch (_err) {
-        if (!disposed) {
-          setApiSuggestions([]);
-        }
-      } finally {
-        if (!disposed) {
-          setSuggestionsLoading(false);
-        }
-      }
-    }, 250);
+    const params = new URLSearchParams(window.location.search);
+    const tokenFromUrl = (params.get("reset_token") || "").trim();
+    if (!tokenFromUrl) return;
+    setForgotMode(true);
+    setResetToken(tokenFromUrl);
+  }, []);
 
-    return () => {
-      disposed = true;
-      clearTimeout(timer);
-    };
-  }, [searchText]);
+  useEffect(() => {
+    if (!token || activeTab !== "results") return;
+    if (priceAlerts.length === 0) {
+      fetchPriceAlerts(token);
+    }
+    if (alertNotifications.length === 0) {
+      fetchAlertNotifications(token);
+    }
+  }, [activeTab, token, priceAlerts.length, alertNotifications.length]);
+
+  useEffect(() => {
+    if (!token || activeTab !== "cart") return;
+    if (wishlistItems.length === 0 && !wishlistLoading) {
+      fetchWishlist(token);
+    }
+  }, [activeTab, token, wishlistItems.length, wishlistLoading]);
+
+  useEffect(() => {
+    if (activeTab !== "analysis") return;
+    setAnalysisHistory((current) => current || DEFAULT_ANALYSIS_HISTORY);
+    setAnalysisProducts([]);
+    setAnalysisHasSearched(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (compareQuery.trim()) {
+      setAlertQuery(compareQuery.trim());
+    }
+  }, [compareQuery]);
+
+  useEffect(() => {
+    fetchPopularSearches();
+  }, []);
 
   const fetchMyImages = async (authToken) => {
     try {
@@ -147,19 +378,218 @@ function App() {
     }
   };
 
+  const fetchCurrentUser = async (authToken) => {
+    if (!authToken) return null;
+    const res = await axios.get(`${API_BASE}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
+    return res.data?.user || null;
+  };
+
+  const fetchPriceAlerts = async (authToken) => {
+    if (!authToken) return;
+    try {
+      setAlertsLoading(true);
+      const res = await axios.get(`${API_BASE}/api/price-alerts`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      setPriceAlerts(res.data?.alerts || []);
+      setEmailAlertsEnabled(Boolean(res.data?.email_enabled));
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setAlertsLoading(false);
+    }
+  };
+
+  const fetchAlertNotifications = async (authToken, options = {}) => {
+    if (!authToken) return;
+    const { unreadOnly = false } = options;
+    try {
+      setNotificationsLoading(true);
+      const res = await axios.get(`${API_BASE}/api/alert-notifications`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+        params: unreadOnly ? { unread_only: true, limit: 10 } : { limit: 10 },
+      });
+      setAlertNotifications(res.data?.notifications || []);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setNotificationsLoading(false);
+    }
+  };
+
+  const fetchSearchHistory = async (authToken) => {
+    if (!authToken) return;
+    try {
+      setSearchHistoryLoading(true);
+      const res = await axios.get(`${API_BASE}/api/me/search-history`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+        params: { limit: 10 },
+      });
+      setSearchHistory(res.data?.search_history || []);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSearchHistoryLoading(false);
+    }
+  };
+
+  const fetchWishlist = async (authToken) => {
+    if (!authToken) return;
+    try {
+      setWishlistLoading(true);
+      const res = await axios.get(`${API_BASE}/api/wishlist`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+        params: { limit: 20 },
+      });
+      setWishlistItems(res.data?.wishlist || []);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setWishlistLoading(false);
+    }
+  };
+
+  const fetchDashboardSummary = async (authToken) => {
+    if (!authToken) return;
+    const cacheKey = `dashboard:${authToken}`;
+    const cached = readClientCache(cacheKey, 1000 * 60);
+    if (cached) {
+      setDashboardSummary(cached);
+      return;
+    }
+    try {
+      setDashboardLoading(true);
+      const res = await axios.get(`${API_BASE}/api/dashboard-summary`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      setDashboardSummary(res.data || null);
+      writeClientCache(cacheKey, res.data || null);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setDashboardLoading(false);
+    }
+  };
+
+  const fetchRecommendations = async (authToken) => {
+    if (!authToken) return;
+    const cacheKey = `recommendations:${authToken}`;
+    const cached = readClientCache(cacheKey, 1000 * 60);
+    if (cached) {
+      setRecommendations(cached.recommendations || []);
+      return;
+    }
+    try {
+      setRecommendationsLoading(true);
+      const res = await axios.get(`${API_BASE}/api/recommendations`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+        params: { limit: 30 },
+      });
+      setRecommendations(res.data?.recommendations || []);
+      writeClientCache(cacheKey, res.data || {});
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setRecommendationsLoading(false);
+    }
+  };
+
+  const fetchAnalysisProducts = async (query, options = {}) => {
+    const { autoSelectFirst = false } = options;
+    const normalizedQuery = sanitizePlainText(query, 255);
+    setAnalysisHasSearched(true);
+    if (!normalizedQuery) {
+      setAnalysisProducts([]);
+      setAnalysisError("");
+      setSelectedAnalysisProduct(null);
+      setAnalysisHistory(DEFAULT_ANALYSIS_HISTORY);
+      return;
+    }
+    try {
+      setAnalysisLoading(true);
+      setAnalysisError("");
+      const res = await axios.get(`${API_BASE}/api/products`, {
+        params: { name: normalizedQuery, limit: 20 },
+      });
+      const products = res.data?.products || [];
+      setAnalysisProducts(products);
+      if (autoSelectFirst && products.length > 0) {
+        setSelectedAnalysisProduct(products[0]);
+        fetchAnalysisHistory(products[0], 1);
+      }
+    } catch (err) {
+      console.error(err);
+      setAnalysisProducts([]);
+      setAnalysisError("Could not load stored products for analysis.");
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
+  const fetchAnalysisHistory = async (product, page = 1) => {
+    const productId = Number(product?.product_id);
+    if (!productId) {
+      setAnalysisHistory(DEFAULT_ANALYSIS_HISTORY);
+      return;
+    }
+    try {
+      setAnalysisHistoryLoading(true);
+      setAnalysisError("");
+      const res = await axios.get(`${API_BASE}/api/price-history`, {
+        params: { product_id: productId, page, per_page: 20 },
+      });
+      setSelectedAnalysisProduct(product);
+      setAnalysisHistory(res.data || DEFAULT_ANALYSIS_HISTORY);
+    } catch (err) {
+      console.error(err);
+      setAnalysisHistory(DEFAULT_ANALYSIS_HISTORY);
+      setAnalysisError(err.response?.data?.error || "Could not load historical prices.");
+    } finally {
+      setAnalysisHistoryLoading(false);
+    }
+  };
+
+  const fetchPopularSearches = async () => {
+    const cacheKey = "popular-searches";
+    const cached = readClientCache(cacheKey, 1000 * 60 * 5);
+    if (cached) {
+      setPopularSearches(cached.popular_searches || []);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/popular-searches`, {
+        params: { limit: 6 },
+      });
+      setPopularSearches(res.data?.popular_searches || []);
+      writeClientCache(cacheKey, res.data || {});
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const handleAuth = async (event) => {
     event.preventDefault();
     setAuthError("");
-    if (!username || !password) {
-      setAuthError("Please enter username and password.");
+    const safeUsername = sanitizePlainText(username, 64);
+    const safeEmail = sanitizePlainText(email, 320).toLowerCase();
+    const safePhone = sanitizePlainText(phone, 30);
+    const safePostalCode = sanitizePlainText(postalCode, 12);
+    if (!safeUsername || !password) {
+      setAuthError("Please enter your username or email and password.");
       return;
     }
     if (authMode === "signup") {
-      if (!USERNAME_REGEX.test(username)) {
+      if (!USERNAME_REGEX.test(safeUsername)) {
         setAuthError("Username can only use letters, numbers, underscores (_) and dots (.), no spaces.");
         return;
       }
-      if (!phone || !postalCode) {
+      if (!safeEmail) {
+        setAuthError("Email is required for signup.");
+        return;
+      }
+      if (!safePhone || !safePostalCode) {
         setAuthError("Phone number and postal code are required for signup.");
         return;
       }
@@ -173,27 +603,46 @@ function App() {
       setAuthLoading(true);
       const endpoint = authMode === "signup" ? "/api/auth/signup" : "/api/auth/signin";
       const payload = authMode === "signup"
-        ? { username, password, confirm_password: confirmPassword, phone, postal_code: postalCode }
-        : { username, password };
+        ? {
+            username: safeUsername,
+            email: safeEmail,
+            password,
+            confirm_password: confirmPassword,
+            phone: safePhone,
+            postal_code: safePostalCode,
+          }
+        : { username: safeUsername, password };
       const res = await axios.post(`${API_BASE}${endpoint}`, payload);
       setToken(res.data.token);
       setUser(res.data.user);
+      setProfileEmail(res.data.user?.email || "");
+      setProfilePhone(res.data.user?.phone || "");
+      setProfilePostalCode(res.data.user?.postal_code || "");
       localStorage.setItem(
         AUTH_STORAGE_KEY,
         JSON.stringify({ token: res.data.token, user: res.data.user })
       );
       setUsername("");
+      setEmail("");
       setPassword("");
       setConfirmPassword("");
       setPhone("");
       setPostalCode("");
+      setForgotEmail("");
+      setResetToken("");
+      setForgotMode(false);
       setShowPassword(false);
       setShowConfirmPassword(false);
       setActiveTab("home");
       setProfileOpen(false);
-      fetchMyImages(res.data.token);
+      fetchDashboardSummary(res.data.token);
+      fetchRecommendations(res.data.token);
     } catch (err) {
-      setAuthError(err.response?.data?.error || "Authentication failed");
+      if (!err.response) {
+        setAuthError(`Cannot reach the server at ${API_BASE}. Start the backend and try again.`);
+      } else {
+        setAuthError(err.response?.data?.error || "Authentication failed");
+      }
     } finally {
       setAuthLoading(false);
     }
@@ -208,8 +657,23 @@ function App() {
     setPreview(null);
     setResult(null);
     setImages([]);
+    setSearchHistory([]);
+    setWishlistItems([]);
+    setDashboardSummary(null);
+    setRecommendations([]);
+    setPriceAlerts([]);
+    setAlertNotifications([]);
+    setAnalysisProducts([]);
+    setSelectedAnalysisProduct(null);
+    setAnalysisHistory(DEFAULT_ANALYSIS_HISTORY);
+    setComparisonBasket([]);
+    setNotificationPanelOpen(false);
+    setProfileEmail("");
+    setProfilePhone("");
+    setProfilePostalCode("");
     setActiveTab("home");
     setProfileOpen(false);
+    clearClientCacheByPrefix("compare:");
   };
 
   const handleFile = (file) => {
@@ -278,9 +742,41 @@ function App() {
     if (tabKey !== "results") {
       clearCompareResults({ clearQuery: true });
     }
+    const targetUrl = new URL(window.location.href);
+    if (tabKey === "landing") {
+      targetUrl.pathname = "/";
+      targetUrl.searchParams.delete("tab");
+    } else if (tabKey === "home") {
+      targetUrl.pathname = "/home";
+      targetUrl.searchParams.delete("tab");
+    } else if (tabKey === "results") {
+      targetUrl.pathname = "/results";
+      targetUrl.searchParams.delete("tab");
+    } else if (tabKey === "upload") {
+      targetUrl.pathname = "/upload";
+      targetUrl.searchParams.delete("tab");
+    } else {
+      targetUrl.pathname = "/";
+      targetUrl.searchParams.set("tab", tabKey);
+    }
+    if (window.location.href !== `${targetUrl.origin}${targetUrl.pathname}${targetUrl.search}`) {
+      window.history.pushState({}, "", `${targetUrl.pathname}${targetUrl.search}`);
+    }
     setActiveTab(tabKey);
     setProfileOpen(false);
-    if (tabKey === "uploads") fetchMyImages(token);
+    if (tabKey === "uploads") {
+      fetchMyImages(token);
+      fetchSearchHistory(token);
+      fetchDashboardSummary(token);
+      fetchRecommendations(token);
+    }
+    if (tabKey === "cart") {
+      fetchWishlist(token);
+    }
+    if (tabKey === "analysis") {
+      setAnalysisHistory(DEFAULT_ANALYSIS_HISTORY);
+      setSelectedAnalysisProduct(null);
+    }
   };
 
   const handleDeleteImage = async (imageId) => {
@@ -300,10 +796,10 @@ function App() {
 
   const getStoreLogoUrl = (store) => {
     const normalized = (store || "").toLowerCase();
-    if (normalized.includes("amazon")) return "https://logo.clearbit.com/amazon.com";
-    if (normalized.includes("ebay")) return "https://logo.clearbit.com/ebay.com";
-    if (normalized.includes("walmart")) return "https://logo.clearbit.com/walmart.com";
-    if (normalized.includes("target")) return "https://logo.clearbit.com/target.com";
+    if (normalized.includes("amazon")) return buildAssetUrl("https://logo.clearbit.com/amazon.com");
+    if (normalized.includes("ebay")) return buildAssetUrl("https://logo.clearbit.com/ebay.com");
+    if (normalized.includes("walmart")) return buildAssetUrl("https://logo.clearbit.com/walmart.com");
+    if (normalized.includes("target")) return buildAssetUrl("https://logo.clearbit.com/target.com");
     return "";
   };
 
@@ -368,11 +864,11 @@ function App() {
   const buildShareUrl = (product) => {
     const q = (product || "").trim();
     const url = new URL(window.location.href);
+    url.pathname = q ? "/results" : "/";
+    url.searchParams.delete("tab");
     if (!q) {
-      url.searchParams.delete("tab");
       url.searchParams.delete("product");
     } else {
-      url.searchParams.set("tab", "results");
       url.searchParams.set("product", q);
     }
     return `${url.origin}${url.pathname}${url.search}`;
@@ -393,6 +889,7 @@ function App() {
     setShareNotice("");
     setCompareLastUpdatedAt(null);
     compareSnapshotRef.current = "";
+    clearClientCacheByPrefix("compare:");
     if (clearQuery) {
       setCompareQuery("");
     }
@@ -401,8 +898,14 @@ function App() {
 
   const readCompareDeepLink = () => {
     const params = new URLSearchParams(window.location.search);
+    const path = (window.location.pathname || "/").toLowerCase();
+    const pathTab = path === "/" ? "landing"
+      : path.startsWith("/home") ? "home"
+      : path.startsWith("/results") ? "results"
+      : path.startsWith("/upload") ? "upload"
+      : "";
     return {
-      tab: (params.get("tab") || "").trim().toLowerCase(),
+      tab: pathTab || (params.get("tab") || "").trim().toLowerCase(),
       product: (params.get("product") || "").trim(),
     };
   };
@@ -428,6 +931,275 @@ function App() {
       setShareNotice("Share link copied.");
     } catch (_err) {
       setShareNotice("Could not copy automatically. Use this link: " + shareUrl);
+    }
+  };
+
+  const shareCurrentDeal = (platform, deal) => {
+    const product = (compareQuery || deal?.name || "").trim();
+    if (!product) {
+      setShareNotice("Search for a product first to share it.");
+      return;
+    }
+    const shareUrl = encodeURIComponent(deal?.url || buildShareUrl(product));
+    const shareText = encodeURIComponent(
+      `${deal?.name || product} for ${toCurrency(deal?.price)} on ${deal?.store || deal?.store_name || "a store"}`
+    );
+    const targets = {
+      instagram: `https://www.instagram.com/?url=${shareUrl}`,
+      snapchat: `https://www.snapchat.com/scan?attachmentUrl=${shareUrl}`,
+      telegram: `https://t.me/share/url?url=${shareUrl}&text=${shareText}`,
+      reddit: `https://www.reddit.com/submit?url=${shareUrl}&title=${shareText}`,
+      whatsapp: `https://wa.me/?text=${shareText}%20${shareUrl}`,
+      x: `https://twitter.com/intent/tweet?text=${shareText}&url=${shareUrl}`,
+      facebook: `https://www.facebook.com/sharer/sharer.php?u=${shareUrl}`,
+      linkedin: `https://www.linkedin.com/sharing/share-offsite/?url=${shareUrl}`,
+      email: `mailto:?subject=${encodeURIComponent(`Deal: ${deal?.name || product}`)}&body=${shareText}%0A${shareUrl}`,
+    };
+    if (platform === "native") {
+      if (navigator.share) {
+        navigator.share({
+          title: deal?.name || product,
+          text: decodeURIComponent(shareText),
+          url: decodeURIComponent(shareUrl),
+        }).catch(() => {
+          setShareNotice("Share canceled.");
+        });
+        return;
+      }
+      setShareNotice("Native share not available. Use the share options below.");
+      return;
+    }
+    const targetUrl = targets[platform];
+    if (!targetUrl) return;
+    window.open(targetUrl, "_blank", "noopener,noreferrer,width=720,height=640");
+  };
+
+  const openSharePopup = (deal) => {
+    if (!deal) {
+      setShareNotice("Search for a product first to share it.");
+      return;
+    }
+    setSharePopupDeal(deal);
+    setSharePopupOpen(true);
+  };
+
+  const handleSharePopupAction = (platform) => {
+    if (!sharePopupDeal) return;
+    shareCurrentDeal(platform, sharePopupDeal);
+    setSharePopupOpen(false);
+  };
+
+  const toggleBasketItem = (product) => {
+    const productUrl = product?.url || product?.product_url || "";
+    if (!productUrl) return;
+    setComparisonBasket((prev) => {
+      const exists = prev.some((item) => (item.url || item.product_url || "") === productUrl);
+      if (exists) {
+        return prev.filter((item) => (item.url || item.product_url || "") !== productUrl);
+      }
+      if (prev.length >= 4) {
+        return [...prev.slice(1), product];
+      }
+      return [...prev, product];
+    });
+  };
+
+  const handleSavePriceAlert = async () => {
+    const product = sanitizePlainText(alertQuery || compareQuery, 255);
+    const safeAlertEmail = sanitizePlainText(alertEmail, 320).toLowerCase();
+    if (!token) {
+      setAlertError("Sign in to create price alerts.");
+      return;
+    }
+    if (!product) {
+      setAlertError("Search for a product before creating an alert.");
+      return;
+    }
+    if (alertTargetPrice === "" || Number.isNaN(Number(alertTargetPrice))) {
+      setAlertError("Enter a valid target price.");
+      return;
+    }
+    if (alertChannel === "email" && !safeAlertEmail) {
+      setAlertError("Enter an email address for email alerts.");
+      return;
+    }
+
+    const payload = {
+      query_text: product,
+      target_price: Number(alertTargetPrice),
+      notification_channel: alertChannel,
+      contact_email: alertChannel === "email" ? safeAlertEmail : null,
+    };
+
+    try {
+      setAlertSaving(true);
+      setAlertError("");
+    const matchingAlert = (priceAlerts || []).find(
+      (alert) => (alert.query_text || "").trim().toLowerCase() === product.trim().toLowerCase()
+    );
+    const endpoint = matchingAlert
+        ? `${API_BASE}/api/price-alerts/${matchingAlert.alert_id}`
+        : `${API_BASE}/api/price-alerts`;
+      const method = matchingAlert ? "put" : "post";
+      const res = await axios[method](endpoint, payload, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      await fetchPriceAlerts(token);
+      await fetchAlertNotifications(token);
+      setAlertNotice(
+        res.data?.notifications_created
+          ? "Alert saved and matched an offer immediately."
+          : matchingAlert
+            ? "Alert updated."
+            : "Alert created."
+      );
+    } catch (err) {
+      setAlertError(err.response?.data?.error || "Could not save the alert.");
+    } finally {
+      setAlertSaving(false);
+    }
+  };
+
+  const handleDeletePriceAlert = async (alertId) => {
+    if (!token || !alertId) return;
+    try {
+      setAlertSaving(true);
+      await axios.delete(`${API_BASE}/api/price-alerts/${alertId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      await fetchPriceAlerts(token);
+      setAlertNotice("Alert removed.");
+    } catch (err) {
+      setAlertError(err.response?.data?.error || "Could not remove the alert.");
+    } finally {
+      setAlertSaving(false);
+    }
+  };
+
+  const markNotificationRead = async (notificationId) => {
+    if (!token || !notificationId) return;
+    try {
+      await axios.put(
+        `${API_BASE}/api/alert-notifications/${notificationId}/read`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setAlertNotifications((prev) => prev.map((item) => (
+        item.notification_id === notificationId ? { ...item, is_read: true } : item
+      )));
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const saveToWishlist = async (product) => {
+    const productUrl = product?.url || product?.product_url || "";
+    if (!token || !productUrl) return;
+    try {
+      setSavingWishlistUrl(productUrl);
+      setWishlistError("");
+      await axios.post(`${API_BASE}/api/wishlist`, {
+        product_name: product?.name || product?.title || "Product",
+        category: product?.category || "general",
+        store_name: product?.store || product?.store_name || "",
+        current_price: product?.price,
+        product_url: productUrl,
+        image_url: product?.image_url || product?.image || product?.thumbnail || "",
+        source_query: sanitizePlainText(compareQuery || searchText, 255) || null,
+      }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      await fetchWishlist(token);
+      setWishlistNotice("Saved to wishlist.");
+    } catch (err) {
+      setWishlistError(err.response?.data?.error || "Could not save to wishlist.");
+    } finally {
+      setSavingWishlistUrl("");
+    }
+  };
+
+  const removeWishlistItem = async (wishlistId) => {
+    if (!token || !wishlistId) return;
+    try {
+      await axios.delete(`${API_BASE}/api/wishlist/${wishlistId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      await fetchWishlist(token);
+      setWishlistNotice("Removed from wishlist.");
+    } catch (err) {
+      setWishlistError(err.response?.data?.error || "Could not remove wishlist item.");
+    }
+  };
+
+  const deleteSearchHistoryItem = async (searchId) => {
+    if (!token || !searchId) return;
+    try {
+      await axios.delete(`${API_BASE}/api/me/search-history/${searchId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setSearchHistory((prev) => prev.filter((item) => item.search_id !== searchId));
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleForgotPassword = async (event) => {
+    event.preventDefault();
+    setAuthError("");
+    setForgotNotice("");
+    const safeForgotEmail = sanitizePlainText(forgotEmail, 320).toLowerCase();
+    try {
+      setAuthLoading(true);
+      const endpoint = resetToken.trim() ? "/api/auth/reset-password" : "/api/auth/forgot-password";
+      const payload = resetToken.trim()
+        ? { token: resetToken.trim(), password, confirm_password: confirmPassword }
+        : { email: safeForgotEmail };
+      const res = await axios.post(`${API_BASE}${endpoint}`, payload);
+      const preview = res.data?.reset_token_preview;
+      if (preview) {
+        setForgotNotice(`Reset link email could not be delivered. Use this token for testing: ${preview}`);
+      } else {
+        setForgotNotice(res.data?.message || "Reset instructions sent.");
+      }
+      if (resetToken.trim()) {
+        setPassword("");
+        setConfirmPassword("");
+        setResetToken("");
+      }
+    } catch (err) {
+      setAuthError(err.response?.data?.error || "Could not process password reset.");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleProfileSave = async (event) => {
+    event.preventDefault();
+    if (!token) return;
+    const safeProfileEmail = sanitizePlainText(profileEmail, 320).toLowerCase();
+    const safeProfilePhone = sanitizePlainText(profilePhone, 30);
+    const safeProfilePostalCode = sanitizePlainText(profilePostalCode, 12);
+    try {
+      setProfileSaving(true);
+      setProfileNotice("");
+      setProfileError("");
+      const res = await axios.put(`${API_BASE}/api/profile`, {
+        email: safeProfileEmail,
+        phone: safeProfilePhone,
+        postal_code: safeProfilePostalCode,
+      }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setUser(res.data.user);
+      localStorage.setItem(
+        AUTH_STORAGE_KEY,
+        JSON.stringify({ token, user: res.data.user })
+      );
+      setProfileNotice("Profile updated.");
+    } catch (err) {
+      setProfileError(err.response?.data?.error || "Could not update profile.");
+    } finally {
+      setProfileSaving(false);
     }
   };
 
@@ -503,6 +1275,79 @@ function App() {
     return uniq;
   }, [compareProducts]);
 
+  const dedupedRecommendations = useMemo(() => {
+    const seen = new Set();
+    return (recommendations || []).filter((item) => {
+      const name = String(item?.name || item?.title || "").trim().toLowerCase();
+      const image = String(item?.image_url || item?.image || "").trim().toLowerCase();
+      const url = String(item?.product_url || item?.url || "").trim().toLowerCase();
+      const key = name ? `${name}|${image || url}` : (url || String(item?.product_id || "").trim().toLowerCase());
+      if (!key) return false;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [recommendations]);
+
+  const mixedRecommendations = useMemo(() => {
+    const groups = new Map();
+    const getStoreKey = (item) => {
+      const raw = String(item?.store || item?.store_name || "").toLowerCase();
+      if (raw.includes("ebay")) return "ebay";
+      if (raw.includes("walmart")) return "walmart";
+      return raw || "other";
+    };
+    dedupedRecommendations.forEach((item) => {
+      const key = getStoreKey(item);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    });
+
+    const preferred = ["ebay", "walmart"];
+    const remainingKeys = Array.from(groups.keys()).filter((k) => !preferred.includes(k) && k !== "other");
+    const order = [...preferred, ...remainingKeys, "other"].filter((k) => groups.has(k));
+
+    const result = [];
+    let added = true;
+    while (added) {
+      added = false;
+      order.forEach((key) => {
+        const list = groups.get(key);
+        if (list && list.length) {
+          result.push(list.shift());
+          added = true;
+        }
+      });
+    }
+    return result;
+  }, [dedupedRecommendations]);
+
+  const currentQueryAlert = useMemo(() => {
+    const normalizedQuery = compareQuery.trim().toLowerCase();
+    if (!normalizedQuery) return null;
+    return (priceAlerts || []).find((alert) => (alert.query_text || "").trim().toLowerCase() === normalizedQuery) || null;
+  }, [compareQuery, priceAlerts]);
+
+  const unreadAlertCount = useMemo(
+    () => (alertNotifications || []).filter((item) => !item.is_read).length,
+    [alertNotifications]
+  );
+
+  const wishlistUrlMap = useMemo(() => {
+    const entries = new Map();
+    (wishlistItems || []).forEach((item) => {
+      if (item.product_url) {
+        entries.set(item.product_url, item);
+      }
+    });
+    return entries;
+  }, [wishlistItems]);
+
+  const basketUrlSet = useMemo(
+    () => new Set((comparisonBasket || []).map((item) => item.url || item.product_url || "").filter(Boolean)),
+    [comparisonBasket]
+  );
+
   const displayedCompareProducts = useMemo(() => {
     let rows = [...(compareProducts || [])];
 
@@ -552,11 +1397,12 @@ function App() {
 
   const runCompareSearch = async (query, options = {}) => {
     const { activateResultsTab = true, silent = false, keepExisting = false } = options;
-    const product = (query || "").trim();
+    const product = sanitizePlainText(query, 255);
     if (!product) {
       setCompareError("Enter a product name to compare.");
       return;
     }
+    const clientCacheKey = `compare:${product.toLowerCase()}`;
     try {
       if (silent) {
         setCompareLiveRefreshing(true);
@@ -569,6 +1415,22 @@ function App() {
         setCompareSummary(null);
         setCompareProducts([]);
       }
+      if (!silent) {
+        const cached = readClientCache(clientCacheKey, 1000 * 60 * 2);
+        if (cached) {
+          const allResults = cached.all_results || [];
+          compareSnapshotRef.current = buildCompareSnapshot(allResults);
+          setCompareSummary(cached);
+          setCompareProducts(allResults);
+          setCompareLastUpdatedAt(new Date());
+          setCompareUpdateNotice("Loaded from cache.");
+          if (activateResultsTab) {
+            setActiveTab("results");
+          }
+          setCompareLoading(false);
+          return;
+        }
+      }
       const res = await axios.get(`${API_BASE}/api/compare-prices`, {
         params: { product },
       });
@@ -580,6 +1442,7 @@ function App() {
       setCompareSummary(payload);
       setCompareProducts(allResults);
       setCompareLastUpdatedAt(new Date());
+      writeClientCache(clientCacheKey, payload);
       if (silent && hasChanged) {
         setCompareUpdateNotice("Prices updated from live sources.");
       } else if (!silent) {
@@ -588,6 +1451,12 @@ function App() {
       }
       if (activateResultsTab) {
         setActiveTab("results");
+      }
+      if (token) {
+        fetchAlertNotifications(token, { unreadOnly: false });
+        fetchSearchHistory(token);
+        fetchDashboardSummary(token);
+        fetchRecommendations(token);
       }
     } catch (err) {
       const message = getFriendlyCompareError(err);
@@ -608,16 +1477,33 @@ function App() {
   useEffect(() => {
     if (!user || deepLinkHydratedRef.current) return;
     deepLinkHydratedRef.current = true;
-    const { tab, product } = readCompareDeepLink();
+    const { tab } = readCompareDeepLink();
     const hasSavedTab = Boolean(localStorage.getItem(TAB_STORAGE_KEY));
-    if (!hasSavedTab && NAV_ITEMS.some((item) => item.key === tab)) {
+    if (tab === "landing" || NAV_ITEMS.some((item) => item.key === tab)) {
       setActiveTab(tab);
-    }
-    if (product) {
-      setCompareQuery(product);
+    } else if (!hasSavedTab) {
+      setActiveTab("landing");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
+
+  useEffect(() => {
+    const { tab } = readCompareDeepLink();
+    if (tab === "landing" || NAV_ITEMS.some((item) => item.key === tab)) {
+      setActiveTab(tab);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const { tab } = readCompareDeepLink();
+      if (NAV_ITEMS.some((item) => item.key === tab)) {
+        setActiveTab(tab);
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -635,8 +1521,95 @@ function App() {
   }, [shareNotice]);
 
   useEffect(() => {
+    if (!alertNotice && !alertError) return undefined;
+    const timeoutId = setTimeout(() => {
+      setAlertNotice("");
+      setAlertError("");
+    }, 3200);
+    return () => clearTimeout(timeoutId);
+  }, [alertNotice, alertError]);
+
+  useEffect(() => {
+    if (!wishlistNotice && !wishlistError) return undefined;
+    const timeoutId = setTimeout(() => {
+      setWishlistNotice("");
+      setWishlistError("");
+    }, 3200);
+    return () => clearTimeout(timeoutId);
+  }, [wishlistNotice, wishlistError]);
+
+  useEffect(() => {
+    if (!profileNotice && !profileError && !forgotNotice) return undefined;
+    const timeoutId = setTimeout(() => {
+      setProfileNotice("");
+      setProfileError("");
+      setForgotNotice("");
+    }, 5000);
+    return () => clearTimeout(timeoutId);
+  }, [profileNotice, profileError, forgotNotice]);
+
+  useEffect(() => {
+    if (!sharePopupOpen) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setSharePopupOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [sharePopupOpen]);
+
+  useEffect(() => {
+    if (!notificationPanelOpen) return undefined;
+    const updateNotificationFlyoutPosition = () => {
+      if (typeof window === "undefined") return;
+      const trigger = notificationTriggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const padding = 12;
+      const maxWidth = Math.min(420, window.innerWidth - padding * 2);
+      const right = Math.max(padding, window.innerWidth - rect.right);
+      const top = rect.bottom + 12;
+      if (window.innerWidth < 560) {
+        setNotificationFlyoutStyle({
+          top,
+          left: padding,
+          right: padding,
+          width: "auto",
+        });
+        return;
+      }
+      setNotificationFlyoutStyle({ top, right, width: maxWidth });
+    };
+
+    updateNotificationFlyoutPosition();
+    const handleClose = () => setNotificationPanelOpen(false);
+    const handleReposition = () => updateNotificationFlyoutPosition();
+    window.addEventListener("click", handleClose);
+    window.addEventListener("resize", handleReposition);
+    window.addEventListener("scroll", handleReposition, true);
+    return () => {
+      window.removeEventListener("click", handleClose);
+      window.removeEventListener("resize", handleReposition);
+      window.removeEventListener("scroll", handleReposition, true);
+    };
+  }, [notificationPanelOpen]);
+
+  useEffect(() => {
+    if (!currentQueryAlert) {
+      setAlertTargetPrice("");
+      setAlertChannel("in_app");
+      setAlertEmail("");
+      return;
+    }
+    setAlertTargetPrice(currentQueryAlert.target_price != null ? String(currentQueryAlert.target_price) : "");
+    setAlertChannel(currentQueryAlert.notification_channel || "in_app");
+    setAlertEmail(currentQueryAlert.contact_email || "");
+  }, [currentQueryAlert]);
+
+  useEffect(() => {
     const product = (compareQuery || "").trim();
-    if (activeTab !== "results" || !product) return undefined;
+    if (activeTab !== "results" || !product || compareProducts.length === 0) return undefined;
 
     const intervalId = setInterval(() => {
       runCompareSearch(product, { activateResultsTab: false, silent: true, keepExisting: true });
@@ -644,7 +1617,13 @@ function App() {
 
     return () => clearInterval(intervalId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, compareQuery]);
+  }, [activeTab, compareQuery, compareProducts.length]);
+
+  const renderLanding = () => (
+    <div className="page-wrap">
+      <LandingPage onStart={() => openTab("upload")} />
+    </div>
+  );
 
   const renderHome = () => (
     <div className="page-wrap">
@@ -679,52 +1658,201 @@ function App() {
       <section className="metrics-grid">
         <article className="metric-card">
           <p>Total Uploads</p>
-          <h3>{images.length}</h3>
+          <h3>{dashboardSummary?.metrics?.total_uploads ?? images.length}</h3>
         </article>
         <article className="metric-card">
-          <p>Latest Prediction</p>
-          <h3>{formatPredictionLabel(result?.predictions?.[0]?.label) || "N/A"}</h3>
+          <p>Saved Products</p>
+          <h3>{dashboardSummary?.metrics?.saved_products ?? wishlistItems.length}</h3>
         </article>
         <article className="metric-card">
-          <p>Active Model</p>
-          <h3>EfficientNetB0</h3>
+          <p>Active Alerts</p>
+          <h3>{dashboardSummary?.metrics?.active_alerts ?? priceAlerts.length}</h3>
+        </article>
+        <article className="metric-card">
+          <p>Recent Searches</p>
+          <h3>{dashboardSummary?.metrics?.recent_searches ?? searchHistory.length}</h3>
         </article>
       </section>
 
-      <section className="product-grid">
-        {suggestionsLoading && (
-          <article className="product-card">
-            <div className="product-meta">Loading</div>
-            <h4>Fetching product suggestions...</h4>
-            <p>Pulling latest items from API</p>
-          </article>
-        )}
-        {quickProducts.map((item) => (
-          <article className="product-card" key={item.name}>
-            <div className="product-meta">{item.category}</div>
-            <h4>{item.name}</h4>
-            <p>{item.price}</p>
-            <div className="card-actions">
-              <button className="btn btn-dark btn-sm analyze-btn" onClick={() => openTab("upload")}>Analyze</button>
-              <button
-                className="btn btn-outline-primary btn-sm analyze-btn"
-                onClick={() => {
-                  setCompareQuery(item.name);
-                  runCompareSearch(item.name);
-                }}
-              >
-                Compare
+      <section className="analytics-grid">
+        <article className="content-panel nested-panel">
+          <div className="section-head-inline">
+            <div>
+              <h2>Dashboard</h2>
+              <p className="panel-help">Your saved products, live alerts, and latest searches in one place.</p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-primary"
+              onClick={() => fetchDashboardSummary(token)}
+              disabled={dashboardLoading}
+            >
+              {dashboardLoading ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
+          <div className="wishlist-grid">
+            {(dashboardSummary?.saved_products || []).slice(0, 3).map((item) => (
+              <article className="wishlist-card" key={`dash-saved-${item.wishlist_id}`}>
+                {(() => {
+                  const tag = getCategoryTag(item);
+                  return <div className={tag.className}>{tag.label}</div>;
+                })()}
+                <h4>{item.product_name}</h4>
+                <p className="panel-help mb-2">{item.store_name || "Store"}</p>
+                <strong>{item.current_price != null ? toCurrency(item.current_price) : "N/A"}</strong>
+              </article>
+            ))}
+            {!dashboardLoading && (dashboardSummary?.saved_products || []).length === 0 && (
+              <p className="panel-help mb-0">Saved products will show up here after you add items to your wishlist.</p>
+            )}
+          </div>
+        </article>
+
+        <article className="content-panel nested-panel">
+          <h2>Active Price Alerts</h2>
+          <div className="alert-list">
+            {(dashboardSummary?.active_price_alerts || []).slice(0, 4).map((alert) => (
+              <article className="alert-list-item" key={`dash-alert-${alert.alert_id}`}>
+                <div>
+                  <strong>{alert.query_text}</strong>
+                  <div className="alert-meta-line">
+                    <span className="alert-meta-pill">Target {toCurrency(alert.target_price)}</span>
+                    <span className={`alert-meta-pill ${alert.notification_channel === "email" ? "alert-channel-email" : "alert-channel-app"}`}>
+                      {alert.notification_channel === "email" ? "Email" : "In-App"}
+                    </span>
+                    <span className={`alert-meta-pill ${alert.is_triggered ? "alert-status-triggered" : "alert-status-watching"}`}>
+                      {alert.is_triggered ? "Triggered" : "Watching"}
+                    </span>
+                  </div>
+                </div>
+                <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => runCompareSearch(alert.query_text)}>
+                  Open
+                </button>
+              </article>
+            ))}
+            {!dashboardLoading && (dashboardSummary?.active_price_alerts || []).length === 0 && (
+              <p className="panel-help mb-0">Create a price alert from the results page to track a product.</p>
+            )}
+          </div>
+          <h3 className="mt-4">Recent Searches</h3>
+          <div className="history-list compact-list">
+            {(dashboardSummary?.recent_searches || []).map((entry) => (
+              <div className="history-item compact-item" key={`dash-search-${entry.search_id}`}>
+                <div className="history-details">
+                  <div className="history-meta">{formatIstDateTime(entry.timestamp)}</div>
+                  <strong>{entry.query}</strong>
+                </div>
+                <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => runCompareSearch(entry.query)}>
+                  Search Again
+                </button>
+              </div>
+            ))}
+            {!dashboardLoading && (dashboardSummary?.recent_searches || []).length === 0 && (
+              <p className="panel-help mb-0">Your latest product searches will appear here.</p>
+            )}
+          </div>
+        </article>
+      </section>
+
+      <section className="content-panel">
+        <div className="section-head-inline">
+          <div>
+            <h2>Popular Searches</h2>
+            <p className="panel-help">Cached trending product lookups across users.</p>
+          </div>
+          <button type="button" className="btn btn-sm btn-outline-primary" onClick={fetchPopularSearches}>
+            Refresh
+          </button>
+        </div>
+        <div className="history-list compact-list">
+          {popularSearches.map((entry, idx) => (
+            <div className="history-item compact-item" key={`popular-${idx}-${entry.query}`}>
+              <div className="history-details">
+                <div className="history-meta">{entry.search_count} searches</div>
+                <strong>{entry.query}</strong>
+              </div>
+              <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => runCompareSearch(entry.query)}>
+                Explore
               </button>
             </div>
-          </article>
-        ))}
-        {!suggestionsLoading && quickProducts.length === 0 && (
-          <article className="product-card">
-            <div className="product-meta">No Data</div>
-            <h4>No products found</h4>
-            <p>Products from `/api/products` will appear here.</p>
-          </article>
-        )}
+          ))}
+          {popularSearches.length === 0 && (
+            <p className="panel-help mb-0">Popular searches will appear here once the app has search activity.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="content-panel">
+        <div className="section-head-inline">
+          <div>
+            <h2>Recommended For You</h2>
+            <p className="panel-help">Generated from your recent searches and saved items.</p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-sm btn-outline-primary"
+            onClick={() => fetchRecommendations(token)}
+            disabled={recommendationsLoading}
+          >
+            {recommendationsLoading ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+        <div className="wishlist-grid">
+          {mixedRecommendations.map((item) => (
+            <article className="wishlist-card" key={`rec-${item.product_id}`}>
+              <div className="wishlist-image-wrap">
+                {item.image_url ? (
+                  <OptimizedImage
+                    src={buildAssetUrl(item.image_url)}
+                    alt={item.name}
+                    className="wishlist-image"
+                    loading="lazy"
+                    decoding="async"
+                    sizes="(max-width: 768px) 100vw, 220px"
+                    referrerPolicy="no-referrer"
+                    onError={onImgError}
+                  />
+                ) : (
+                  <div className="wishlist-image-fallback">No Image</div>
+                )}
+              </div>
+              <div className="wishlist-card-head">
+                <div>
+                  {(() => {
+                    const tag = getCategoryTag(item);
+                    return <div className={tag.className}>{tag.label}</div>;
+                  })()}
+                  <h4>{item.name}</h4>
+                </div>
+                <strong>{item.lowest_price != null ? toCurrency(item.lowest_price) : "N/A"}</strong>
+              </div>
+              <p className="panel-help mb-2">Matched on {item.matched_terms?.join(", ") || "your activity"}</p>
+              <div className="history-actions">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-primary"
+                  onClick={() => runCompareSearch(item.name, { activateResultsTab: true })}
+                >
+                  Compare
+                </button>
+                <a
+                  href={item.product_url || "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn btn-sm btn-primary"
+                  onClick={(e) => {
+                    if (!item.product_url) e.preventDefault();
+                  }}
+                >
+                  View
+                </a>
+              </div>
+            </article>
+          ))}
+          {!recommendationsLoading && recommendations.length === 0 && (
+            <p className="panel-help mb-0">Search for a few products and recommendations will appear here.</p>
+          )}
+        </div>
       </section>
     </div>
   );
@@ -768,6 +1896,14 @@ function App() {
             </button>
             <button
               type="button"
+              className="btn btn-outline-primary"
+              onClick={() => openSharePopup(displayedCompareProducts[0])}
+              disabled={!displayedCompareProducts.length}
+            >
+              Share Deal
+            </button>
+            <button
+              type="button"
               className="btn btn-outline-danger"
               onClick={() => clearCompareResults({ clearQuery: true })}
               disabled={compareLoading}
@@ -779,6 +1915,179 @@ function App() {
 
         {shareNotice && <p className="compare-notice">{shareNotice}</p>}
 
+        {comparisonBasket.length > 0 && (
+          <section className="content-panel basket-panel compact-results-panel">
+            <div className="section-head-inline basket-panel-head">
+              <div>
+                <h3>Comparison Basket</h3>
+                <p className="panel-help">Pinned deals stay here while you browse.</p>
+              </div>
+              <div className="basket-panel-meta">
+                <span className="alert-badge">{comparisonBasket.length}/4 selected</span>
+                {comparisonBasket.length > 1 && (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-danger"
+                    onClick={() => setComparisonBasket([])}
+                  >
+                    Clear Basket
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="basket-card-grid">
+              {comparisonBasket.map((item, idx) => (
+                <article className="basket-card" key={`basket-item-${idx}-${item.url || item.product_url || item.name || item.title}`}>
+                  <div className="basket-card-top">
+                    {(() => {
+                      const tag = getCategoryTag(item, "Selected Deal");
+                      return <div className={tag.className}>{tag.label}</div>;
+                    })()}
+                    <strong>{toCurrency(item.price)}</strong>
+                  </div>
+                  <h4>{item.name || item.title || "Product"}</h4>
+                  <div className="basket-card-stats">
+                    <span>{item.store || item.store_name || "Store"}</span>
+                    <span>{getRatingDisplay(item)}</span>
+                    <span>{getAvailabilityLabel(item)}</span>
+                  </div>
+                  <div className="basket-actions">
+                    <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => toggleBasketItem(item)}>
+                      Remove
+                    </button>
+                    <a
+                      href={(item.url || item.product_url || "#")}
+                      className="btn btn-sm btn-primary"
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => {
+                        if (!(item.url || item.product_url)) e.preventDefault();
+                      }}
+                    >
+                      View
+                    </a>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section className="alert-panel compact-results-panel">
+          <div className="alert-panel-head">
+            <div>
+              <h3>Price Alerts</h3>
+              <p className="panel-help">Set a target price for this search and get notified when a matching offer reaches it.</p>
+            </div>
+            <div className="alert-badge">{unreadAlertCount} unread</div>
+          </div>
+          <div className="alert-form-grid">
+            <div className="control-group">
+              <label>Alert For</label>
+              <input
+                type="text"
+                value={alertQuery}
+                onChange={(e) => setAlertQuery(e.target.value)}
+                placeholder="e.g. vacuum cleaner"
+              />
+            </div>
+            <div className="control-group">
+              <label>Target Price (INR)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={alertTargetPrice}
+                onChange={(e) => setAlertTargetPrice(e.target.value)}
+                placeholder={compareSummary?.lowest_price?.price != null ? String(compareSummary.lowest_price.price) : "9999"}
+              />
+            </div>
+            <div className="control-group">
+              <label>Notify Via</label>
+              <select value={alertChannel} onChange={(e) => setAlertChannel(e.target.value)}>
+                <option value="in_app">In-App</option>
+                <option value="email">Email</option>
+              </select>
+            </div>
+            {alertChannel === "email" && (
+              <div className="control-group">
+                <label>Email</label>
+                <input
+                  type="email"
+                  value={alertEmail}
+                  onChange={(e) => setAlertEmail(e.target.value)}
+                  placeholder="name@example.com"
+                />
+              </div>
+            )}
+            <div className="alert-actions">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleSavePriceAlert}
+                disabled={alertSaving || !alertQuery.trim()}
+              >
+                {alertSaving ? "Saving..." : "Create Alert"}
+              </button>
+            </div>
+          </div>
+          {!emailAlertsEnabled && alertChannel === "email" && (
+            <p className="panel-help">SMTP is not configured on the server yet. Email alerts will be recorded, but delivery may stay pending.</p>
+          )}
+          {alertsLoading && <p className="panel-help">Loading saved alerts...</p>}
+          {alertNotice && <p className="compare-notice">{alertNotice}</p>}
+          {alertError && <p className="inline-error">{alertError}</p>}
+          <div className="alert-list">
+            {(priceAlerts || []).map((alert) => (
+              <article
+                className="alert-list-item"
+                key={alert.alert_id}
+              >
+                <div>
+                  <strong>{alert.query_text}</strong>
+                  <div className="alert-meta">
+                    <span className="alert-meta-pill">Target {toCurrency(alert.target_price)}</span>
+                    <span
+                      className={`alert-meta-pill ${
+                        alert.notification_channel === "email" ? "alert-channel-email" : "alert-channel-app"
+                      }`}
+                    >
+                      {alert.notification_channel === "email" ? "Email" : "In-App"}
+                    </span>
+                    <span
+                      className={`alert-meta-pill ${
+                        alert.is_triggered ? "alert-status-triggered" : "alert-status-watching"
+                      }`}
+                    >
+                      {alert.is_triggered ? "Triggered" : "Watching"}
+                    </span>
+                  </div>
+                </div>
+                <div className="history-actions">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-primary"
+                    onClick={() => setCompareQuery(alert.query_text || "")}
+                  >
+                    Use
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-danger"
+                    onClick={() => handleDeletePriceAlert(alert.alert_id)}
+                    disabled={alertSaving}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </article>
+            ))}
+            {!alertsLoading && priceAlerts.length === 0 && (
+              <p className="panel-help mb-0">No alerts yet. Search for a product and set a target price.</p>
+            )}
+          </div>
+        </section>
+
         <div className="results-live-row">
           <div className="live-status">
             <span className={`live-dot ${compareLiveRefreshing ? "live-dot-active" : ""}`} />
@@ -788,6 +2097,8 @@ function App() {
         </div>
 
         {compareUpdateNotice && <p className="compare-notice">{compareUpdateNotice}</p>}
+        {wishlistNotice && <p className="compare-notice">{wishlistNotice}</p>}
+        {wishlistError && <p className="inline-error">{wishlistError}</p>}
 
         {compareError && (
           <div className="compare-error-box">
@@ -843,11 +2154,11 @@ function App() {
             </select>
           </div>
           <div className="control-group">
-            <label>Min Price (₹)</label>
+            <label>Min Price (Rs)</label>
             <input type="number" value={minPriceFilter} onChange={(e) => setMinPriceFilter(e.target.value)} placeholder="0" />
           </div>
           <div className="control-group">
-            <label>Max Price (₹)</label>
+            <label>Max Price (Rs)</label>
             <input type="number" value={maxPriceFilter} onChange={(e) => setMaxPriceFilter(e.target.value)} placeholder="Any" />
           </div>
           <div className="control-group">
@@ -901,28 +2212,33 @@ function App() {
               const logoUrl = getStoreLogoUrl(storeName);
               const best = isBestDeal(deal, idx);
               const trust = getStoreTrust(storeName);
+              const dealUrl = deal.url || deal.product_url || "";
+              const savedWishlistItem = wishlistUrlMap.get(dealUrl);
+              const inBasket = basketUrlSet.has(dealUrl);
               return (
                 <article className={`deal-card ${best ? "best-deal-card" : ""}`} key={`${storeName}-${deal.url || idx}-${idx}`}>
                   {best && <div className="best-deal-badge">Best Deal</div>}
                   <div className="deal-image-wrap">
-                  {imageUrl ? (
-                    <img
-                      src={imageUrl}
-                      alt={deal.name || "Product"}
-                      className="deal-image"
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      onError={onImgError}
-                    />
-                  ) : (
-                    <div className="deal-image-fallback">No Image</div>
-                  )}
+                    {imageUrl ? (
+                      <OptimizedImage
+                        src={buildAssetUrl(imageUrl)}
+                        alt={deal.name || "Product"}
+                        className="deal-image"
+                        loading="lazy"
+                        decoding="async"
+                        sizes="(max-width: 768px) 100vw, 320px"
+                        referrerPolicy="no-referrer"
+                        onError={onImgError}
+                      />
+                    ) : (
+                      <div className="deal-image-fallback">No Image</div>
+                    )}
                   </div>
 
                   <div className="deal-content">
                     <div className="deal-store">
                       {logoUrl ? (
-                        <img src={logoUrl} alt={`${storeName} logo`} className="store-logo" />
+                        <OptimizedImage src={logoUrl} alt={`${storeName} logo`} className="store-logo" loading="eager" decoding="async" />
                       ) : (
                         <span className="store-logo-fallback">{storeName.slice(0, 1).toUpperCase()}</span>
                       )}
@@ -937,15 +2253,43 @@ function App() {
                     </div>
                     <a
                       className="btn btn-primary view-deal-btn"
-                      href={deal.url || "#"}
+                      href={dealUrl || "#"}
                       target="_blank"
                       rel="noreferrer"
                       onClick={(e) => {
-                        if (!deal.url) e.preventDefault();
+                        if (!dealUrl) e.preventDefault();
                       }}
                     >
                       View Deal
                     </a>
+                    <button
+                      type="button"
+                      className="btn btn-outline-primary view-deal-btn"
+                      onClick={() => (
+                        savedWishlistItem
+                          ? removeWishlistItem(savedWishlistItem.wishlist_id)
+                          : saveToWishlist(deal)
+                      )}
+                      disabled={!dealUrl || savingWishlistUrl === dealUrl}
+                    >
+                      {savingWishlistUrl === dealUrl ? "Saving..." : savedWishlistItem ? "Saved" : "Save"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline-secondary view-deal-btn"
+                      onClick={() => toggleBasketItem(deal)}
+                      disabled={!dealUrl}
+                    >
+                      {inBasket ? "In Basket" : "Basket"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline-secondary view-deal-btn"
+                      onClick={() => openSharePopup(deal)}
+                      disabled={!dealUrl}
+                    >
+                      Share
+                    </button>
                   </div>
                 </article>
               );
@@ -971,12 +2315,15 @@ function App() {
                   const logoUrl = getStoreLogoUrl(storeName);
                   const best = isBestDeal(deal, idx);
                   const trust = getStoreTrust(storeName);
+                  const dealUrl = deal.url || deal.product_url || "";
+                  const savedWishlistItem = wishlistUrlMap.get(dealUrl);
+                  const inBasket = basketUrlSet.has(dealUrl);
                   return (
                     <tr key={`${storeName}-${deal.url || idx}-${idx}`} className={best ? "best-row" : ""}>
                       <td>
                         <div className="table-store">
                           {logoUrl ? (
-                            <img src={logoUrl} alt={`${storeName} logo`} className="store-logo" />
+                            <OptimizedImage src={logoUrl} alt={`${storeName} logo`} className="store-logo" loading="eager" decoding="async" />
                           ) : (
                             <span className="store-logo-fallback">{storeName.slice(0, 1).toUpperCase()}</span>
                           )}
@@ -994,15 +2341,43 @@ function App() {
                       <td>
                         <a
                           className="btn btn-sm btn-primary"
-                          href={deal.url || "#"}
+                          href={dealUrl || "#"}
                           target="_blank"
                           rel="noreferrer"
                           onClick={(e) => {
-                            if (!deal.url) e.preventDefault();
+                            if (!dealUrl) e.preventDefault();
                           }}
                         >
                           View Deal
                         </a>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-primary ms-2"
+                          onClick={() => (
+                            savedWishlistItem
+                              ? removeWishlistItem(savedWishlistItem.wishlist_id)
+                              : saveToWishlist(deal)
+                          )}
+                          disabled={!dealUrl || savingWishlistUrl === dealUrl}
+                        >
+                          {savedWishlistItem ? "Saved" : "Save"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-secondary ms-2"
+                          onClick={() => toggleBasketItem(deal)}
+                          disabled={!dealUrl}
+                        >
+                          {inBasket ? "In Basket" : "Basket"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-secondary ms-2"
+                          onClick={() => openSharePopup(deal)}
+                          disabled={!dealUrl}
+                        >
+                          Share
+                        </button>
                       </td>
                     </tr>
                   );
@@ -1016,133 +2391,53 @@ function App() {
   );
 
   const renderUpload = () => (
-    <div className="page-wrap">
-      <section className="content-panel">
-        <h2>Upload Product Image</h2>
-        <p className="panel-help">JPEG, PNG, WebP supported. Drag and drop or browse files.</p>
-
-        <div
-          className={`dropzone ${dragActive ? "dropzone-active" : ""}`}
-          onClick={() => inputRef.current && inputRef.current.click()}
-          onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
-          onDragLeave={(e) => { e.preventDefault(); setDragActive(false); }}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragActive(false);
-            handleFile(e.dataTransfer.files && e.dataTransfer.files[0]);
-          }}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              inputRef.current && inputRef.current.click();
-            }
-          }}
-        >
-          <p>{image ? image.name : "Drop image here"}</p>
-          <span>Click to browse</span>
-          <div className="dropzone-limit">10MB max</div>
-             </div>
-
-        <input
-          ref={inputRef}
-          type="file"
-          className="d-none"
-          accept="image/*"
-          onChange={(e) => handleFile(e.target.files[0])}
-        />
-
-        {preview && <img className="preview-image" src={preview} alt="Selected product preview" />}
-
-        <button className="btn btn-primary w-100 py-2 fw-semibold mt-3" onClick={handleUpload} disabled={loading}>
-          {loading ? "Processing..." : "Analyze Image"}
-        </button>
-
-        {result && result.predictions && (
-          <section className="mt-4">
-            <div className="mb-2">
-              <h3 className="h6 mb-0">Prediction</h3>
-            </div>
-            {(() => {
-              const topPrediction = (result.predictions || [])[0];
-              if (!topPrediction) return null;
-              return (
-                <div className="prediction-item">
-                  <strong>{formatPredictionLabel(topPrediction.label)}</strong>
-                  <span>{(topPrediction.confidence * 100).toFixed(2)}%</span>
-                </div>
-              );
-            })()}
-          </section>
-        )}
-
-        {(result || suggestionsLoadingAfterUpload || suggestionsRequestedAfterUpload) && (
-          <section className="mt-4">
-            <div className="suggestions-head">
-              <h3 className="h6 mb-0">Suggested Products From APIs & Scrapers</h3>
-              {suggestionSummary?.average_price != null && (
-                <span className="suggestions-meta">
-                  Avg: {toCurrency(suggestionSummary.average_price)}
-                </span>
-              )}
-            </div>
-            {suggestionsLoadingAfterUpload && (
-              <p className="panel-help">Finding products from multiple sources...</p>
-            )}
-            {!suggestionsLoadingAfterUpload && suggestionsErrorAfterUpload && (
-              <p className="panel-help">{suggestionsErrorAfterUpload}</p>
-            )}
-            {!suggestionsLoadingAfterUpload && !suggestionsErrorAfterUpload && suggestionsRequestedAfterUpload && suggestedProducts.length === 0 && (
-              <p className="panel-help">No matching products found for this prediction yet.</p>
-            )}
-            <div className="suggestion-grid">
-              {suggestedProducts.map((product, idx) => {
-                const store = product.store || product.store_name || "Store";
-                const productName = product.name || product.title || "Product";
-                const url = product.url || product.product_url || "";
-                const imageUrl = product.image_url || product.image || product.thumbnail || "";
-                return (
-                  <article className="suggestion-card" key={`${store}-${productName}-${idx}`}>
-                    <div className="suggestion-image-wrap">
-                      {imageUrl ? (
-                        <img
-                          src={imageUrl}
-                          alt={productName}
-                          className="suggestion-image"
-                          loading="lazy"
-                          referrerPolicy="no-referrer"
-                          onError={onImgError}
-                        />
-                      ) : (
-                        <div className="suggestion-image-fallback">No Image</div>
-                      )}
-                    </div>
-                    <div className="suggestion-store">{store}</div>
-                    <h4>{productName}</h4>
-                    <p>{toCurrency(product.price)}</p>
-                    <a
-                      href={url || "#"}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="btn btn-sm btn-outline-primary"
-                      onClick={(e) => {
-                        if (!url) e.preventDefault();
-                      }}
-                    >
-                      View Deal
-                    </a>
-                  </article>
-                );
-              })}
-            </div>
-          </section>
-        )}
-      </section>
-    </div>
+    <UploadPage
+      dragActive={dragActive}
+      setDragActive={setDragActive}
+      inputRef={inputRef}
+      image={image}
+      handleFile={handleFile}
+      preview={preview}
+      handleUpload={handleUpload}
+      loading={loading}
+      result={result}
+      formatPredictionLabel={formatPredictionLabel}
+      suggestionsLoadingAfterUpload={suggestionsLoadingAfterUpload}
+      suggestionsRequestedAfterUpload={suggestionsRequestedAfterUpload}
+      suggestionSummary={suggestionSummary}
+      suggestionsErrorAfterUpload={suggestionsErrorAfterUpload}
+      suggestedProducts={suggestedProducts}
+      wishlistUrlMap={wishlistUrlMap}
+      buildAssetUrl={buildAssetUrl}
+      onImgError={onImgError}
+      toCurrency={toCurrency}
+      removeWishlistItem={removeWishlistItem}
+      saveToWishlist={saveToWishlist}
+      savingWishlistUrl={savingWishlistUrl}
+    />
   );
 
-  const renderUploads = () => (
+  const renderUploads = () => {
+    return (
+      <UploadsPage
+        historyLoading={historyLoading}
+        images={images}
+        formatPredictionLabel={formatPredictionLabel}
+        buildAssetUrl={buildAssetUrl}
+        fallbackImageSrc={FALLBACK_PRODUCT_IMAGE}
+        formatIstDateTime={formatIstDateTime}
+        compareLoading={compareLoading}
+        runCompareSearch={runCompareSearch}
+        deletingImageId={deletingImageId}
+        handleDeleteImage={handleDeleteImage}
+        searchHistoryLoading={searchHistoryLoading}
+        fetchSearchHistory={fetchSearchHistory}
+        token={token}
+        searchHistory={searchHistory}
+        deleteSearchHistoryItem={deleteSearchHistoryItem}
+      />
+    );
+    /*
     <div className="page-wrap history-page">
       <section className="content-panel history-panel">
         <h2>Your Uploaded Images</h2>
@@ -1156,7 +2451,14 @@ function App() {
               <div className="history-item" key={img.image_id}>
                 <div className="history-item-layout">
                   <div className="history-media">
-                    <img src={img.image_url} alt={img.image_id} className="history-image" />
+                    <OptimizedImage
+                      src={buildAssetUrl(img.thumbnail_url || img.image_url)}
+                      alt={img.image_id}
+                      className="history-image"
+                      loading="lazy"
+                      decoding="async"
+                      sizes="160px"
+                    />
                   </div>
                   <div className="history-details">
                     <div className="history-meta">{formatIstDateTime(img.uploaded_at)}</div>
@@ -1189,25 +2491,185 @@ function App() {
           })}
         </div>
       </section>
-    </div>
-  );
 
-  const renderAbout = () => (
-    <div className="page-wrap">
-      <section className="content-panel">
-        <h2>About</h2>
-        <p className="panel-help">
-        Our Product Price Intelligent System helps classify product images and keep user-specific upload history in a single dashboard.
-        </p>
+      <section className="content-panel history-panel">
+        <div className="section-head-inline">
+          <h2>Recent Searches</h2>
+          <button
+            type="button"
+            className="btn btn-sm btn-outline-primary"
+            onClick={() => fetchSearchHistory(token)}
+            disabled={searchHistoryLoading}
+          >
+            {searchHistoryLoading ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+        {!searchHistoryLoading && searchHistory.length === 0 && (
+          <p className="panel-help">Your product comparisons will show up here.</p>
+        )}
+        <div className="history-list compact-list">
+          {searchHistory.map((entry) => (
+            <div className="history-item compact-item" key={entry.search_id}>
+              <div className="history-details">
+                <div className="history-meta">{formatIstDateTime(entry.timestamp)}</div>
+                <strong>{entry.query}</strong>
+                <div className="history-actions">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-primary"
+                    onClick={() => runCompareSearch(entry.query, { activateResultsTab: true })}
+                  >
+                    Search Again
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-danger"
+                    onClick={() => deleteSearchHistoryItem(entry.search_id)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="content-panel history-panel">
+        <div className="section-head-inline">
+          <h2>Wishlist</h2>
+          <button
+            type="button"
+            className="btn btn-sm btn-outline-primary"
+            onClick={() => fetchWishlist(token)}
+            disabled={wishlistLoading}
+          >
+            {wishlistLoading ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+        {wishlistNotice && <p className="compare-notice">{wishlistNotice}</p>}
+        {wishlistError && <p className="inline-error">{wishlistError}</p>}
+        {!wishlistLoading && wishlistItems.length === 0 && (
+          <p className="panel-help">Save products from the results page to compare them later.</p>
+        )}
+        <div className="wishlist-grid">
+          {wishlistItems.map((item) => (
+            <article className="wishlist-card" key={item.wishlist_id}>
+              <div className="wishlist-card-head">
+                <div>
+                  <div className="product-meta">{item.category || "General"}</div>
+                  <h4>{item.product_name}</h4>
+                </div>
+                <strong>{item.current_price != null ? toCurrency(item.current_price) : "N/A"}</strong>
+              </div>
+              <p className="panel-help mb-2">
+                {(item.store_name || "Store")}{item.source_query ? ` • Saved from "${item.source_query}"` : ""}
+              </p>
+              <p className="history-meta">{formatIstDateTime(item.created_at)}</p>
+              <div className="history-actions">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-primary"
+                  onClick={() => runCompareSearch(item.source_query || item.product_name, { activateResultsTab: true })}
+                >
+                  Compare
+                </button>
+                <a
+                  href={item.product_url || "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn btn-sm btn-primary"
+                  onClick={(e) => {
+                    if (!item.product_url) e.preventDefault();
+                  }}
+                >
+                  View Deal
+                </a>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-danger"
+                  onClick={() => removeWishlistItem(item.wishlist_id)}
+                >
+                  Remove
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
       </section>
     </div>
   );
+    */
+  };
+
+  const renderCart = () => (
+    <CartPage
+      wishlistLoading={wishlistLoading}
+      fetchWishlist={fetchWishlist}
+      wishlistNotice={wishlistNotice}
+      wishlistError={wishlistError}
+      wishlistItems={wishlistItems}
+      toCurrency={toCurrency}
+      removeWishlistItem={removeWishlistItem}
+      runCompareSearch={runCompareSearch}
+      formatIstDateTime={formatIstDateTime}
+      getCategoryTag={getCategoryTag}
+      token={token}
+    />
+  );
+
+  const renderAbout = () => <AboutPage />;
+
+  const renderProfile = () => (
+    <ProfilePage
+      user={user}
+      profileEmail={profileEmail}
+      setProfileEmail={setProfileEmail}
+      profilePhone={profilePhone}
+      setProfilePhone={setProfilePhone}
+      profilePostalCode={profilePostalCode}
+      setProfilePostalCode={setProfilePostalCode}
+      handleProfileSave={handleProfileSave}
+      profileNotice={profileNotice}
+      profileError={profileError}
+      profileSaving={profileSaving}
+    />
+  );
 
   const renderTab = () => {
+    if (activeTab === "landing") return renderLanding();
     if (activeTab === "home") return renderHome();
     if (activeTab === "results") return renderResults();
+    if (activeTab === "analysis") {
+      return (
+        <AnalysisPage
+          analysisQuery={analysisQuery}
+          setAnalysisQuery={setAnalysisQuery}
+          analysisLoading={analysisLoading}
+          analysisHasSearched={analysisHasSearched}
+          analysisProducts={analysisProducts}
+          analysisError={analysisError}
+          selectedAnalysisProduct={selectedAnalysisProduct}
+          setSelectedAnalysisProduct={setSelectedAnalysisProduct}
+          analysisHistory={analysisHistory}
+          analysisHistoryLoading={analysisHistoryLoading}
+          fetchAnalysisProducts={fetchAnalysisProducts}
+          fetchAnalysisHistory={fetchAnalysisHistory}
+          setAnalysisProducts={setAnalysisProducts}
+          setAnalysisHasSearched={setAnalysisHasSearched}
+          setAnalysisHistory={setAnalysisHistory}
+          setAnalysisError={setAnalysisError}
+          buildAssetUrl={buildAssetUrl}
+          onImgError={onImgError}
+          toCurrency={toCurrency}
+          formatIstDateTime={formatIstDateTime}
+        />
+      );
+    }
+    if (activeTab === "cart") return renderCart();
     if (activeTab === "upload") return renderUpload();
     if (activeTab === "uploads") return renderUploads();
+    if (activeTab === "profile") return renderProfile();
     return renderAbout();
   };
 
@@ -1220,40 +2682,63 @@ function App() {
               <div className="auth-card">
                 <h1>Account Access</h1>
                 <p>Sign in to upload images and view history.</p>
-                <div className="btn-group w-100 mb-3">
-                  <button
-                    type="button"
-                    className={`btn ${authMode === "signin" ? "btn-primary" : "btn-outline-primary"}`}
-                    onClick={() => {
-                      setAuthMode("signin");
-                      setAuthError("");
-                    }}
-                  >
-                    Sign In
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn ${authMode === "signup" ? "btn-primary" : "btn-outline-primary"}`}
-                    onClick={() => {
-                      setAuthMode("signup");
-                      setAuthError("");
-                    }}
-                  >
-                    Sign Up
-                  </button>
-                </div>
+                {!forgotMode && (
+                  <div className="btn-group w-100 mb-3">
+                    <button
+                      type="button"
+                      className={`btn ${authMode === "signin" ? "btn-primary" : "btn-outline-primary"}`}
+                      onClick={() => {
+                        setAuthMode("signin");
+                        setAuthError("");
+                      }}
+                    >
+                      Sign In
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn ${authMode === "signup" ? "btn-primary" : "btn-outline-primary"}`}
+                      onClick={() => {
+                        setAuthMode("signup");
+                        setAuthError("");
+                      }}
+                    >
+                      Sign Up
+                    </button>
+                  </div>
+                )}
+                {!forgotMode ? (
                 <form onSubmit={handleAuth}>
                   <div className="mb-3">
-                    <label htmlFor="username" className="form-label">Username</label>
+                    <label htmlFor="username" className="form-label">
+                      {authMode === "signup" ? "Username" : "Username or Email"}
+                    </label>
                     <input
                       id="username"
                       className="form-control"
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
-                      placeholder="letters, numbers, _ and . only"
+                      placeholder={authMode === "signup" ? "letters, numbers, _ and . only" : "username or email"}
                       autoComplete="username"
+                      required
+                      minLength={authMode === "signup" ? 3 : undefined}
+                      pattern={authMode === "signup" ? "[A-Za-z0-9._]+" : undefined}
                     />
                   </div>
+                  {authMode === "signup" && (
+                    <div className="mb-3">
+                      <label htmlFor="email" className="form-label">Email</label>
+                      <input
+                        id="email"
+                        type="email"
+                        className="form-control"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="name@example.com"
+                        autoComplete="email"
+                        required
+                      />
+                    </div>
+                  )}
                   {authMode === "signup" && (
                     <>
                       <div className="mb-3">
@@ -1265,6 +2750,8 @@ function App() {
                           onChange={(e) => setPhone(e.target.value)}
                           placeholder="e.g. +1 555 123 4567"
                           autoComplete="tel"
+                          required
+                          minLength={7}
                         />
                       </div>
                       <div className="mb-3">
@@ -1276,6 +2763,9 @@ function App() {
                           onChange={(e) => setPostalCode(e.target.value)}
                           placeholder="e.g. 10001"
                           autoComplete="postal-code"
+                          required
+                          minLength={3}
+                          maxLength={12}
                         />
                       </div>
                     </>
@@ -1290,6 +2780,8 @@ function App() {
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
                         autoComplete={authMode === "signup" ? "new-password" : "current-password"}
+                        required
+                        minLength={6}
                       />
                       <button
                         type="button"
@@ -1311,6 +2803,8 @@ function App() {
                           value={confirmPassword}
                           onChange={(e) => setConfirmPassword(e.target.value)}
                           autoComplete="new-password"
+                          required
+                          minLength={6}
                         />
                         <button
                           type="button"
@@ -1326,7 +2820,91 @@ function App() {
                   <button className="btn btn-primary w-100 py-2" disabled={authLoading}>
                     {authLoading ? "Please wait..." : authMode === "signup" ? "Create Account" : "Sign In"}
                   </button>
+                  <button
+                    type="button"
+                    className="btn btn-link w-100 mt-2"
+                    onClick={() => {
+                      setForgotMode(true);
+                      setAuthError("");
+                    }}
+                  >
+                    Forgot Password?
+                  </button>
                 </form>
+                ) : (
+                <form onSubmit={handleForgotPassword}>
+                  {!resetToken.trim() ? (
+                    <div className="mb-3">
+                      <label htmlFor="forgotEmail" className="form-label">Email</label>
+                      <input
+                        id="forgotEmail"
+                        type="email"
+                        className="form-control"
+                        value={forgotEmail}
+                        onChange={(e) => setForgotEmail(e.target.value)}
+                        placeholder="Enter your account email"
+                        autoComplete="email"
+                        required
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <div className="mb-3">
+                        <label htmlFor="resetToken" className="form-label">Reset Token</label>
+                        <textarea
+                          id="resetToken"
+                          className="form-control"
+                          rows={3}
+                          value={resetToken}
+                          onChange={(e) => setResetToken(e.target.value)}
+                          required
+                        />
+                      </div>
+                      <div className="mb-3">
+                        <label htmlFor="resetPassword" className="form-label">New Password</label>
+                        <input
+                          id="resetPassword"
+                          type="password"
+                          className="form-control"
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          minLength={6}
+                          required
+                        />
+                      </div>
+                      <div className="mb-4">
+                        <label htmlFor="resetConfirmPassword" className="form-label">Confirm Password</label>
+                        <input
+                          id="resetConfirmPassword"
+                          type="password"
+                          className="form-control"
+                          value={confirmPassword}
+                          onChange={(e) => setConfirmPassword(e.target.value)}
+                          minLength={6}
+                          required
+                        />
+                      </div>
+                    </>
+                  )}
+                  {authError && <p className="auth-error">{authError}</p>}
+                  {forgotNotice && <p className="compare-notice">{forgotNotice}</p>}
+                  <button className="btn btn-primary w-100 py-2" disabled={authLoading}>
+                    {authLoading ? "Please wait..." : resetToken.trim() ? "Reset Password" : "Send Reset Link"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-link w-100 mt-2"
+                    onClick={() => {
+                      setForgotMode(false);
+                      setForgotNotice("");
+                      setAuthError("");
+                      setResetToken("");
+                    }}
+                  >
+                    Back to Sign In
+                  </button>
+                </form>
+                )}
               </div>
             </div>
           </div>
@@ -1341,7 +2919,13 @@ function App() {
         <aside className="app-sidebar">
           <div className="sidebar-head">
             <div>
-              <h2>Product Price Intelligent System</h2>
+              <button
+                type="button"
+                className="sidebar-title-btn"
+                onClick={() => openTab("landing")}
+              >
+                Product Price Intelligent System
+              </button>
             </div>
           </div>
           <nav className="sidebar-nav">
@@ -1359,15 +2943,96 @@ function App() {
 
         <section className="dashboard-main">
           <header className="topbar">
-            <div className="topbar-title">{NAV_ITEMS.find((x) => x.key === activeTab)?.label}</div>
+            <div className="topbar-title">
+              {activeTab === "landing" ? "Home" : NAV_ITEMS.find((x) => x.key === activeTab)?.label}
+            </div>
             <div className="topbar-actions">
-              <div className="user-chip">{user.username}</div>
+              <div className="notification-flyout-wrap">
+                <button
+                  type="button"
+                  className={`notification-chip notification-trigger ${notificationPanelOpen ? "active" : ""}`}
+                  ref={notificationTriggerRef}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setNotificationPanelOpen((value) => !value);
+                    if (!notificationPanelOpen && token) {
+                      fetchAlertNotifications(token);
+                    }
+                  }}
+                >
+                  Alerts {unreadAlertCount}
+                </button>
+                {notificationPanelOpen &&
+                  typeof document !== "undefined" &&
+                  createPortal(
+                  <div
+                    className="notification-flyout"
+                    style={notificationFlyoutStyle || { top: 80, right: 20, width: 420 }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="notification-list-head">
+                      <div>
+                        <h4>Notifications</h4>
+                        <p className="panel-help mb-0">Recent alert matches and updates.</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline-primary"
+                        onClick={() => fetchAlertNotifications(token)}
+                        disabled={notificationsLoading}
+                      >
+                        {notificationsLoading ? "Refreshing..." : "Refresh"}
+                      </button>
+                    </div>
+                    <div className="notification-list flyout-list">
+                      {alertNotifications.slice(0, 6).map((item) => (
+                        <article className={`notification-item ${item.is_read ? "read" : "unread"}`} key={item.notification_id}>
+                          <div>
+                            <strong>{item.matched_product_name || "Price Alert"}</strong>
+                            <p>{item.message}</p>
+                            <div className="alert-meta-line">
+                    <span className="alert-meta-pill">Target {toCurrency(alert.target_price)}</span>
+                    <span className={`alert-meta-pill ${alert.notification_channel === "email" ? "alert-channel-email" : "alert-channel-app"}`}>
+                      {alert.notification_channel === "email" ? "Email" : "In-App"}
+                    </span>
+                    <span className={`alert-meta-pill ${alert.is_triggered ? "alert-status-triggered" : "alert-status-watching"}`}>
+                      {alert.is_triggered ? "Triggered" : "Watching"}
+                    </span>
+                  </div>
+                          </div>
+                          {!item.is_read && (
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-outline-primary"
+                              onClick={() => markNotificationRead(item.notification_id)}
+                            >
+                              Mark Read
+                            </button>
+                          )}
+                        </article>
+                      ))}
+                      {!notificationsLoading && alertNotifications.length === 0 && (
+                        <p className="panel-help mb-0">Notifications will appear here when an alert is matched.</p>
+                      )}
+                    </div>
+                  </div>,
+                  document.body
+                )}
+              </div>
+              <button
+                type="button"
+                className="user-chip"
+                onClick={() => openTab("profile")}
+              >
+                {user.username}
+              </button>
               <div className="profile-menu-wrap">
                 <button className="profile-btn" type="button" onClick={() => setProfileOpen((p) => !p)}>
                   More
                 </button>
                 {profileOpen && (
                   <div className="profile-menu">
+                    <button type="button" onClick={() => openTab("profile")}>Profile</button>
                     <button type="button" onClick={() => openTab("uploads")}>Uploads ({images.length})</button>
                     <button type="button" className="danger-btn" onClick={handleSignOut}>Logout</button>
                   </div>
@@ -1378,9 +3043,50 @@ function App() {
           {renderTab()}
         </section>
       </div>
+      {sharePopupOpen &&
+        sharePopupDeal &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            className="share-popup-overlay"
+            onClick={() => setSharePopupOpen(false)}
+          >
+            <div className="share-popup" onClick={(e) => e.stopPropagation()}>
+              <div className="share-popup-head">
+                <div>
+                  <h4>Share Deal</h4>
+                  <p className="panel-help mb-0">
+                    {sharePopupDeal.name || sharePopupDeal.product_name || "Select an app to share."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary"
+                  onClick={() => setSharePopupOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+              <div className="share-popup-grid">
+                <button type="button" onClick={() => handleSharePopupAction("native")}>Share...</button>
+                <button type="button" onClick={() => handleSharePopupAction("whatsapp")}>WhatsApp</button>
+                <button type="button" onClick={() => handleSharePopupAction("instagram")}>Instagram</button>
+                <button type="button" onClick={() => handleSharePopupAction("snapchat")}>Snapchat</button>
+                <button type="button" onClick={() => handleSharePopupAction("telegram")}>Telegram</button>
+                <button type="button" onClick={() => handleSharePopupAction("x")}>X</button>
+                <button type="button" onClick={() => handleSharePopupAction("facebook")}>Facebook</button>
+                <button type="button" onClick={() => handleSharePopupAction("linkedin")}>LinkedIn</button>
+                <button type="button" onClick={() => handleSharePopupAction("reddit")}>Reddit</button>
+                <button type="button" onClick={() => handleSharePopupAction("email")}>Email</button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </main>
   );
 }
 
 export default App;
+
 
