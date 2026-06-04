@@ -31,6 +31,7 @@ def _parse_price(price_text):
         return None
     cleaned = re.sub(r"[^0-9.,]", "", price_text)
     cleaned = cleaned.replace(",", "")
+    cleaned = cleaned.lstrip(".")
     try:
         return float(cleaned)
     except ValueError:

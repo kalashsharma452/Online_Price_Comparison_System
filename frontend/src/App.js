@@ -114,7 +114,8 @@ function buildAssetUrl(path) {
 function sanitizePlainText(value, maxLen = 255) {
   if (value == null) return "";
   let text = String(value);
-  text = text.replace(/[\x00-\x1f\x7f]/g, " ");
+  const controlChars = new RegExp("[" + String.fromCharCode(0) + "-" + String.fromCharCode(31) + String.fromCharCode(127) + "]", "g");
+  text = text.replace(controlChars, " ");
   if (text.includes("<") || text.includes(">")) {
     text = text.replace(/<[^>]*>/g, " ");
   }
@@ -1311,13 +1312,13 @@ function App() {
     let added = true;
     while (added) {
       added = false;
-      order.forEach((key) => {
+      for (const key of order) {
         const list = groups.get(key);
         if (list && list.length) {
           result.push(list.shift());
           added = true;
         }
-      });
+      }
     }
     return result;
   }, [dedupedRecommendations]);
@@ -1384,6 +1385,7 @@ function App() {
     });
 
     return rows;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [compareProducts, storeFilter, minPriceFilter, maxPriceFilter, shippingFilter, sortBy]);
 
   const isBestDeal = (deal, idx) => {
@@ -2990,15 +2992,15 @@ function App() {
                           <div>
                             <strong>{item.matched_product_name || "Price Alert"}</strong>
                             <p>{item.message}</p>
-                            <div className="alert-meta-line">
-                    <span className="alert-meta-pill">Target {toCurrency(alert.target_price)}</span>
-                    <span className={`alert-meta-pill ${alert.notification_channel === "email" ? "alert-channel-email" : "alert-channel-app"}`}>
-                      {alert.notification_channel === "email" ? "Email" : "In-App"}
-                    </span>
-                    <span className={`alert-meta-pill ${alert.is_triggered ? "alert-status-triggered" : "alert-status-watching"}`}>
-                      {alert.is_triggered ? "Triggered" : "Watching"}
-                    </span>
-                  </div>
+                            {item.matched_price != null && (
+                              <div className="alert-meta-line">
+                                <span className="alert-meta-pill">Matched {toCurrency(item.matched_price)}</span>
+                                {item.matched_store_name && <span className="alert-meta-pill">{item.matched_store_name}</span>}
+                                <span className={`alert-meta-pill ${item.delivery_channel === "email" ? "alert-channel-email" : "alert-channel-app"}`}>
+                                  {item.delivery_channel === "email" ? "Email" : "In-App"}
+                                </span>
+                              </div>
+                            )}
                           </div>
                           {!item.is_read && (
                             <button

@@ -62,7 +62,7 @@ def _fetch_app_access_token():
         return ""
 
 
-def search_ebay_products(query):
+def search_ebay_products(query, limit=30):
     if not query or not query.strip():
         return []
 
@@ -78,7 +78,7 @@ def search_ebay_products(query):
     }
     params = {
         "q": query.strip(),
-        "limit": 10,
+        "limit": max(1, min(int(limit or 20), 200)),
     }
 
     try:

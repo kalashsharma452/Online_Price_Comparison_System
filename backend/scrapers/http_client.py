@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 from urllib.parse import urlparse
@@ -86,14 +87,41 @@ def build_browser_headers(host, referer=None, extra=None):
     return headers
 
 
+def _build_proxies():
+    proxy = os.getenv("SCRAPER_PROXY", "").strip()
+    http_proxy = os.getenv("SCRAPER_HTTP_PROXY", "").strip()
+    https_proxy = os.getenv("SCRAPER_HTTPS_PROXY", "").strip()
+    if proxy and not (http_proxy or https_proxy):
+        http_proxy = proxy
+        https_proxy = proxy
+    proxies = {}
+    if http_proxy:
+        proxies["http"] = http_proxy
+    if https_proxy:
+        proxies["https"] = https_proxy
+    return proxies or None
+
+
+def _proxy_for_selenium():
+    proxy = os.getenv("SCRAPER_PROXY", "").strip()
+    if proxy:
+        return proxy
+    https_proxy = os.getenv("SCRAPER_HTTPS_PROXY", "").strip()
+    if https_proxy:
+        return https_proxy
+    http_proxy = os.getenv("SCRAPER_HTTP_PROXY", "").strip()
+    return http_proxy or None
+
+
 def throttled_get(url, headers=None, params=None, timeout=15, retries=2):
     host = urlparse(url).netloc
     attempt = 0
+    proxies = _build_proxies()
 
     while True:
         throttler.wait_for_slot(host)
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=timeout)
+            response = requests.get(url, headers=headers, params=params, timeout=timeout, proxies=proxies)
         except requests.RequestException:
             if attempt >= retries:
                 raise
@@ -129,6 +157,9 @@ def fetch_page_with_selenium(url, wait_seconds=3):
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument(f"--user-agent={_next_user_agent()}")
+        proxy = _proxy_for_selenium()
+        if proxy:
+            options.add_argument(f"--proxy-server={proxy}")
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(25)

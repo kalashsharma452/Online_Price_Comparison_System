@@ -58,6 +58,21 @@ except ImportError:
 
 load_dotenv()
 
+
+def _validate_required_secrets():
+    missing = []
+    if not os.getenv("DATABASE_URL", "").strip():
+        missing.append("DATABASE_URL")
+    if not os.getenv("JWT_SECRET", "").strip() and not os.getenv("SECRET_KEY", "").strip():
+        missing.append("JWT_SECRET or SECRET_KEY")
+    if missing:
+        raise RuntimeError(
+            f"Missing required environment variables: {', '.join(missing)}. "
+            "Set them before starting the server."
+        )
+
+_validate_required_secrets()
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB
 app.config["SECRET_KEY"] = (os.getenv("SECRET_KEY") or "price-intelligence-secret").strip()
@@ -3843,3 +3858,4 @@ init_db()
 
 if __name__ == "__main__":
     app.run(debug=True, port=int(os.getenv("PORT", "5050")))
+

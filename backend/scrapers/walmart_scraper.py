@@ -7,6 +7,22 @@ from bs4 import BeautifulSoup
 from .http_client import build_browser_headers, fetch_page_with_selenium, throttled_get
 
 
+def _looks_blocked(html):
+    if not html:
+        return True
+    lowered = html.lower()
+    return any(
+        token in lowered
+        for token in (
+            "robot or human",
+            "verify you are a human",
+            "captcha",
+            "access denied",
+            "blocked",
+        )
+    )
+
+
 def _extract_image_url(img_el):
     if not img_el:
         return None
@@ -59,11 +75,13 @@ def search_walmart_products(query, limit=10):
         html = None
 
     rows = _parse_walmart_html(html, limit=limit, query=query)
-    if rows:
+    if rows and not _looks_blocked(html):
         return rows
 
-    selenium_html = fetch_page_with_selenium(search_url, wait_seconds=4)
+    selenium_html = fetch_page_with_selenium(search_url, wait_seconds=6)
     if not selenium_html:
+        return []
+    if _looks_blocked(selenium_html):
         return []
     return _parse_walmart_html(selenium_html, limit=limit, query=query)
 

@@ -10,6 +10,10 @@ Thumbs.db
 !.env.example
 !backend/.env.example
 !frontend/.env.example
+!.env.prod.example
+backend/.env
+frontend/.env
+.env.prod
 
 # Python
 __pycache__/
