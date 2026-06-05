@@ -8,7 +8,7 @@ import { AboutPage, CartPage, ProfilePage, UploadPage, UploadsPage } from "./com
 import { DEFAULT_ANALYSIS_HISTORY, NAV_ITEMS } from "./appConstants";
 import "./App.css";
 
-const DEFAULT_API_BASE = "http://127.0.0.1:5050";
+const DEFAULT_API_BASE = "https://online-price-comparison-system.onrender.com";
 const RAW_API_BASE = (process.env.REACT_APP_API_BASE || "").trim();
 
 function normalizeApiBase(rawBase) {
